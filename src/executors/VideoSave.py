@@ -9,6 +9,8 @@ import base64
 import numpy as np
 import cv2
 
+import time
+
 sys.path.append(os.path.join(os.path.dirname(__file__), '../../../../'))
 
 from sdks.novavision.src.base.component import Component
@@ -17,6 +19,8 @@ from components.VideoSave.src.utils.response import build_response
 from components.VideoSave.src.models.PackageModel import PackageModel
 from sdks.novavision.src.base.application import Application
 from sdks.novavision.src.media.image import Image
+
+from components.VideoSave.src.classes.Fps import FPSCounter
 
 logging.basicConfig(level=logging.INFO)
 
@@ -49,166 +53,35 @@ class VideoSave(Component):
         self.temp_dir = "/storage/temp"
         self.logger = logging.getLogger(__name__)
 
-    def _generate_filename(self, extension=".mp4"):
-        """Generate unique filename"""
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        unique_id = str(uuid.uuid4())[:8]
-        return f"{self.title}_{timestamp}_{unique_id}{extension}"
+        self.fps_counter = FPSCounter(update_interval=4.0)
+
 
     @staticmethod
     def bootstrap(config: dict):
         video_name = VideoSave.application.get_param(config=config, name="videoTitle")
         return {"video_name": video_name, "outputVideoUrl": None}
 
-    def estimate_stream_fps(self, img, sample_duration=2.0):
-        start = time.time()
-        frame_count = 0
 
-        while (time.time() - start) < sample_duration:
-            frame_count += 1
 
-        duration = time.time() - start
-
-        print(round(frame_count / duration, 2) if duration > 0 else 0.0)
-
-        return round(frame_count / duration, 2) if duration > 0 else 0.0
-
-    def get_stream_fps_and_determine_final_fps(self, img):
-        try:
-            #system_fps = self.estimate_stream_fps(img)
-            system_fps = 10
-            print("system_fps:",system_fps)
-
-            if self.system_control == "Enable":
-                if system_fps <= 1:
-                    system_fps = 1
-
-                final_fps = system_fps
-            else:
-                final_fps = min(self.user_fps, system_fps)
-
-            return final_fps, f"System FPS: {system_fps}, Final FPS: {final_fps}"
-        except Exception as e:
-            return self.user_fps, f"FPS estimation failed, using user FPS: {self.user_fps}"
-
-    def capture_input_frames(self):
-        """Frames are captured from inputImage"""
-        frames = []
-        start_time = time.time()
-
-        if not self.image:
-            self.logger.error("No input images found")
-            return frames
-
-        self.logger.info(f"inputImage structure: {self.image}")
-
-        final_fps, fps_msg = self.get_stream_fps_and_determine_final_fps(self.image)
-        print(final_fps)
-        print(fps_msg)
-
-        # Image objesinin value alanında direkt numpy array varsa
-        if hasattr(self.image, 'value') and isinstance(self.image.value, np.ndarray):
-            frame = self.image.value
-            if frame is not None:
-                # record_duration * fps kadar aynı frame'i ekle
-                total_frames = int(self.record_duration * 10)
-                frames = [frame.copy() for _ in range(total_frames)]
-                self.logger.info(f"Created {len(frames)} frames from numpy array")
-
-        self.logger.info(f"Captured {len(frames)} frames in {time.time() - start_time:.2f}s")
-        return frames
-
-    def create_video_from_frames(self, frames, fps):
-        """Create video from frames"""
-        if not frames:
-            return None
-
-        try:
-            os.makedirs(self.temp_dir, exist_ok=True)
-
-            # Frame'i uint8 formatına dönüştür
-            first_frame = frames[0]
-            if first_frame.dtype != np.uint8:
-                first_frame = np.clip(first_frame, 0, 255).astype(np.uint8)
-
-            height, width, _ = first_frame.shape
-            filename = self._generate_filename()
-            output_path = os.path.join(self.temp_dir, filename)
-
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
-
-            if not writer.isOpened():
-                self.logger.error("Failed to open video writer")
-                return None
-
-            for frame in frames:
-                # Her frame'i uint8'e dönüştür
-                if frame.dtype != np.uint8:
-                    frame = np.clip(frame, 0, 255).astype(np.uint8)
-                writer.write(frame)
-
-            writer.release()
-            self.logger.info(f"Video saved successfully: {output_path}")
-            return output_path if os.path.exists(output_path) else None
-
-        except Exception as e:
-            self.logger.error(f"Video creation error: {str(e)}")
-            return None
-
-    def save_video(self, video_path):
-        """Save video to local or cloud"""
-        try:
-            _, ext = os.path.splitext(video_path)
-            video_filename = self._generate_filename(ext)
-
-            if self.target_type == "TargetLocal":
-                os.makedirs(self.local_path, exist_ok=True)
-                full_path = os.path.join(self.local_path, video_filename)
-                shutil.copy2(video_path, full_path)
-
-                if not os.path.exists(full_path):
-                    raise IOError(f"Failed to save video to {full_path}")
-
-                return full_path
-
-            else:
-                import requests
-
-                os.makedirs("/storage/temp", exist_ok=True)
-                temp_path = f"/storage/temp/{video_filename}"
-                shutil.copy2(video_path, temp_path)
-
-                api_endpoint = f"{self.environment.web_api}/storage/default/upload?access-token={self.environment.device_access_token}"
-
-                with open(temp_path, "rb") as f:
-                    files = {"file": f}
-                    response = requests.post(api_endpoint, files=files, data={"title": video_filename})
-
-                os.remove(temp_path)
-
-                if response.status_code != 200:
-                    raise Exception(f"Storage upload failed: {response.status_code}")
-
-                return response.text
-
-        except Exception as e:
-            self.logger.error(f"save_video error: {e}")
-            return None
-
-    def process_and_save_video(self):
-        """Main function to process video and save it"""
-        self.logger.info("VideoSave process started")
-        frames = self.capture_input_frames()
-        if frames:
-            video_path = self.create_video_from_frames(frames, 10)
-            if video_path:
-                self.logger.info("VideoSave process completed successfully")
 
     def run(self):
-        """Run the video save process"""
+        """Her frame geldiğinde otomatik çalışan metod"""
         self.image = Image.get_frame(img=self.image, redis_db=self.redis_db)
-        self.process_and_save_video()
+
+        print("Frame geldi", time.time())
+
+        # FPS güncelle
+        self.fps_counter.update()
+        print("FPS Counter frame count:", self.fps_counter.frame_count)
+        print("Anlık FPS:", self.fps_counter.get_fps())
+
+        current_fps = self.fps_counter.get_fps()
+        if current_fps > 0:
+            print(f"FPS: {current_fps:.2f}")
+
+        print(f"FPS: {current_fps:.2f}")
+
+
         packageModel = build_response(context=self)
         return packageModel
 

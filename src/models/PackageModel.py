@@ -27,10 +27,23 @@ class CustomOutput(BaseModel):
     type: str
 
 
+
 class OutputVideoUrl(Output):
-    name: Literal["outputVideoUrl"] = "outputVideoUrl"
-    value: str
-    type: Literal["string"] = "string"
+    name: Literal["OutputVideoUrl"] = "OutputVideoUrl"
+    value: Union[List[Image],Image]
+    type: str = "object"
+
+    @validator("type", pre=True, always=True)
+    def set_type_based_on_value(cls, value, values):
+        value = values.get('value')
+        if isinstance(value, Image):
+            return "object"
+        elif isinstance(value, list):
+            return "list"
+
+    class Config:
+        title = "Image"
+
 
 
 class VideoSaveInputs(Inputs):
